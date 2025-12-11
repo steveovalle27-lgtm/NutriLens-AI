@@ -1,0 +1,7 @@
+{
+  "name": "NutriLens AI",
+  "description": "AI-powered nutrition assistant that analyzes your meals instantly.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
