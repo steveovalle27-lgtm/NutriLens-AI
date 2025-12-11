@@ -1,68 +1,174 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   Camera, Upload, X, Loader2, ScanLine, BarChart2, 
   Activity, Zap, Info, Calendar, Layout, MessageSquare, 
-  Scale, Calculator, ChevronRight, Droplets, Flame, History
+  Scale, Calculator, ChevronRight, Droplets, Flame, History,
+  ChefHat, Send, Sparkles, User, FileJson, Utensils
 } from 'lucide-react';
-import { AnalysisState, HistoryItem } from '../types';
-import { analyzeFoodImage } from '../services/geminiService';
+import { AnalysisState, HistoryItem, ChatMessage, Recipe, HealthProfile } from '../types';
+import { analyzeFoodImage, createNutritionChat, generateRecipes } from '../services/geminiService';
 import NutritionChart from './NutritionChart';
 
 interface DashboardProps {
   onLogout: () => void;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
-  const [state, setState] = useState<AnalysisState>({
-    isLoading: false,
-    error: null,
-    data: null,
-    imagePreview: null,
+const UserDashboard: React.FC<DashboardProps> = ({ onLogout }) => {
+  const [activeTab, setActiveTab] = useState<'scan' | 'chat' | 'recipes'>('scan');
+  
+  // SCANNER STATE
+  const [scanState, setScanState] = useState<AnalysisState>({
+    isLoading: false, error: null, data: null, imagePreview: null,
   });
-
-  const [recentHistory] = useState<HistoryItem[]>([
-    { id: '1', foodName: 'Ensalada César', calories: 350, timeAgo: 'Hace 2h', icon: '🥗' },
-    { id: '2', foodName: 'Salmón a la plancha', calories: 420, timeAgo: 'Hace 5h', icon: '🐟' },
-    { id: '3', foodName: 'Batido de proteína', calories: 180, timeAgo: 'Ayer', icon: '🥤' },
-  ]);
-
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // CHAT STATE
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+      { 
+          id: '0', 
+          role: 'model', 
+          text: `Hola, soy NutriLens AI, tu asistente nutricional inteligente.
+Para ofrecerte recomendaciones realmente personalizadas y adaptadas a tu salud, necesito conocer algunos datos importantes sobre ti.
 
+Prometo usar esta información solo para mejorar tus planes nutricionales y ayudarte de forma segura y profesional.
+
+Para comenzar, cuéntame lo siguiente:
+1. ¿Cuál es tu edad?
+2. ¿Cuánto pesas actualmente?
+3. (Opcional pero útil) ¿Cuál es tu estatura?
+4. ¿Cuál es tu objetivo principal en este momento?
+   o Bajar de peso
+   o Ganar masa muscular
+   o Mantener peso
+   o Controlar una enfermedad
+   o Mejorar energía o hábitos
+5. ¿Tienes alguna enfermedad o condición de salud que debería considerar?
+   (Ejemplos: obesidad, presión alta, diabetes, prediabetes, colesterol alto, hígado graso, anemia)
+6. ¿Tienes alergias o alimentos que necesite evitar?
+7. ¿Hay algún alimento que no te guste o prefieras no consumir?
+
+Con esta información crearé un perfil nutricional adaptado totalmente a ti.
+¡Estoy listo cuando tú lo estés! 🌱✨`, 
+          timestamp: new Date() 
+      }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const chatSession = useRef<any>(null);
+
+  // USER PROFILE STATE (Extracted from Chat)
+  const [healthProfile, setHealthProfile] = useState<HealthProfile>({});
+
+  // RECIPE STATE
+  const [recipeInput, setRecipeInput] = useState('');
+  const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [isRecipeLoading, setIsRecipeLoading] = useState(false);
+
+  // --- HANDLERS ---
+
+  // Scanner
   const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
     reader.onloadend = () => {
       const base64 = reader.result as string;
-      setState(prev => ({ ...prev, imagePreview: base64, data: null, error: null }));
+      setScanState(prev => ({ ...prev, imagePreview: base64, data: null, error: null }));
       handleAnalyze(base64);
     };
     reader.readAsDataURL(file);
   };
 
   const handleAnalyze = async (base64Image: string) => {
-    setState(prev => ({ ...prev, isLoading: true, error: null }));
+    setScanState(prev => ({ ...prev, isLoading: true, error: null }));
     try {
       const result = await analyzeFoodImage(base64Image);
-      setState(prev => ({ ...prev, isLoading: false, data: result }));
+      setScanState(prev => ({ ...prev, isLoading: false, data: result }));
     } catch (error) {
-      setState(prev => ({ 
-        ...prev, 
-        isLoading: false, 
-        error: "No pudimos analizar la imagen. Intenta con una foto más clara." 
-      }));
+      setScanState(prev => ({ ...prev, isLoading: false, error: "Error al analizar imagen." }));
     }
   };
 
-  const resetAnalysis = () => {
-    setState({
-      isLoading: false,
-      error: null,
-      data: null,
-      imagePreview: null,
-    });
-    if (fileInputRef.current) fileInputRef.current.value = '';
+  // Chat
+  const handleSendMessage = async () => {
+      if(!chatInput.trim()) return;
+      
+      const userMsg: ChatMessage = { id: Date.now().toString(), role: 'user', text: chatInput, timestamp: new Date() };
+      setChatMessages(prev => [...prev, userMsg]);
+      setChatInput('');
+      setIsChatLoading(true);
+
+      try {
+        if (!chatSession.current) chatSession.current = createNutritionChat();
+        
+        const result = await chatSession.current.sendMessage(userMsg.text);
+        const fullText = result.response.text;
+
+        // --- JSON EXTRACTION LOGIC ---
+        let displayText = fullText;
+        const jsonMatch = fullText.match(/```json\s*([\s\S]*?)\s*```/);
+        
+        if (jsonMatch && jsonMatch[1]) {
+            try {
+                const parsed = JSON.parse(jsonMatch[1]);
+                if (parsed.user_profile_update) {
+                    console.log("Updating Profile:", parsed.user_profile_update);
+                    // Merge new data into existing profile
+                    setHealthProfile(prev => ({
+                        ...prev,
+                        ...parsed.user_profile_update,
+                        // Append arrays if they exist, checking both English and Spanish keys
+                        enfermedades: [
+                            ...(prev.enfermedades || []),
+                            ...(prev.conditions || []),
+                            ...(parsed.user_profile_update.enfermedades || [])
+                        ],
+                        alergias: [
+                            ...(prev.alergias || []),
+                            ...(prev.allergies || []),
+                            ...(parsed.user_profile_update.alergias || [])
+                        ]
+                    }));
+                }
+                // Remove JSON from display text
+                displayText = fullText.replace(/```json[\s\S]*?```/, '').trim();
+            } catch (e) {
+                console.error("Error parsing hidden profile data", e);
+            }
+        }
+
+        const modelMsg: ChatMessage = { 
+            id: (Date.now() + 1).toString(), 
+            role: 'model', 
+            text: displayText, 
+            timestamp: new Date() 
+        };
+        setChatMessages(prev => [...prev, modelMsg]);
+      } catch (e) {
+          console.error(e);
+          setChatMessages(prev => [...prev, { 
+            id: Date.now().toString(), 
+            role: 'model', 
+            text: "Lo siento, tuve un problema de conexión. Por favor verifica tu conexión a internet o intenta de nuevo.", 
+            timestamp: new Date() 
+          }]);
+      } finally {
+          setIsChatLoading(false);
+      }
+  };
+
+  // Recipes
+  const handleGenerateRecipes = async () => {
+      if(!recipeInput.trim()) return;
+      setIsRecipeLoading(true);
+      try {
+        const results = await generateRecipes(recipeInput);
+        setRecipes(results);
+      } catch (e) {
+          console.error(e);
+      } finally {
+          setIsRecipeLoading(false);
+      }
   };
 
   return (
@@ -81,36 +187,61 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
         </div>
 
         <nav className="flex-1 px-4 space-y-2 mt-4">
-          <button className="w-full flex items-center gap-3 px-4 py-3 bg-emerald-600/10 text-emerald-400 border border-emerald-500/20 rounded-xl transition-all">
-            <Camera className="w-5 h-5" />
-            <span className="font-medium text-sm">Analizar Comida</span>
-          </button>
+          <NavItem 
+            active={activeTab === 'scan'} 
+            onClick={() => setActiveTab('scan')} 
+            icon={<Camera />} 
+            label="Analizar Comida" 
+          />
+          <NavItem 
+            active={activeTab === 'chat'} 
+            onClick={() => setActiveTab('chat')} 
+            icon={<MessageSquare />} 
+            label="Asistente AI (RAG)" 
+          />
+           <NavItem 
+            active={activeTab === 'recipes'} 
+            onClick={() => setActiveTab('recipes')} 
+            icon={<ChefHat />} 
+            label="Generar Recetas" 
+          />
           
           <div className="pt-4 pb-2">
             <p className="px-4 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Herramientas</p>
-            <NavItem icon={<Calendar />} label="Planificador" />
-            <NavItem icon={<Activity />} label="Hábitos" />
-            <NavItem icon={<BarChart2 />} label="Análisis" />
-            <NavItem icon={<MessageSquare />} label="Asistente AI" />
-            <NavItem icon={<Calculator />} label="IMC" />
-            <NavItem icon={<Scale />} label="Comp. Corporal" />
+            <NavItem onClick={() => {}} icon={<Calendar />} label="Planificador" />
+            <NavItem onClick={() => {}} icon={<Activity />} label="Hábitos" />
+            <NavItem onClick={() => {}} icon={<BarChart2 />} label="Estadísticas" />
           </div>
+
+          {/* Profile Status Mini-Widget */}
+          {(healthProfile.objetivo || healthProfile.peso) && (
+              <div className="mx-4 p-3 bg-emerald-900/20 border border-emerald-500/20 rounded-xl mt-4">
+                  <div className="flex items-center gap-2 mb-2 text-emerald-400">
+                      <FileJson className="w-4 h-4" />
+                      <span className="text-xs font-bold uppercase">Perfil Detectado</span>
+                  </div>
+                  <div className="space-y-1 text-[10px] text-gray-400">
+                      {healthProfile.objetivo && <p>🎯 {healthProfile.objetivo}</p>}
+                      {healthProfile.peso && <p>⚖️ {healthProfile.peso}</p>}
+                      {healthProfile.actividad && <p>🏃 {healthProfile.actividad}</p>}
+                  </div>
+              </div>
+          )}
         </nav>
 
         <div className="p-4 border-t border-white/5">
-            <button onClick={onLogout} className="w-full py-2 text-sm text-gray-500 hover:text-white transition-colors">
-                Cerrar Sesión
+            <button onClick={onLogout} className="w-full py-2 text-sm text-gray-500 hover:text-white transition-colors flex items-center gap-2">
+                <Layout className="w-4 h-4" /> Cerrar Sesión
             </button>
         </div>
       </aside>
 
       {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col overflow-hidden relative">
-        {/* Decorative Background Blurs */}
         <div className="absolute top-[-10%] left-[20%] w-[400px] h-[400px] bg-purple-900/20 rounded-full blur-[100px] pointer-events-none" />
         <div className="absolute bottom-[-10%] right-[10%] w-[300px] h-[300px] bg-emerald-900/10 rounded-full blur-[100px] pointer-events-none" />
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 scroll-smooth">
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 scroll-smooth relative z-10">
             
             {/* Header */}
             <div className="flex justify-between items-center mb-8">
@@ -118,253 +249,224 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                     <h2 className="text-2xl font-bold flex items-center gap-2">
                         ¡Hola, <span className="text-emerald-400">Usuario!</span> 👋
                     </h2>
-                    <p className="text-gray-400 text-sm">¿Listo para analizar tu próxima comida?</p>
+                    <p className="text-gray-400 text-sm">Tu asistente nutricional está listo.</p>
                 </div>
-                <div className="bg-gradient-to-r from-orange-500 to-pink-500 text-white px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-2 shadow-lg shadow-orange-500/20">
-                    <Flame className="w-3 h-3 fill-current" /> Racha de 7 días
+                <div className="flex items-center gap-4">
+                    <div className="hidden md:flex bg-[#1e1033] px-4 py-2 rounded-full border border-white/10 items-center gap-2">
+                        <User className="w-4 h-4 text-emerald-400" />
+                        <span className="text-xs font-bold text-gray-300">Plan PRO</span>
+                    </div>
                 </div>
             </div>
 
-            {/* Stats Cards Row */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-                <StatCard 
-                    title="Calorías Hoy" 
-                    value="1,847" 
-                    subtitle="153 restantes" 
-                    icon={<Flame className="text-emerald-400" />} 
-                    trend="down"
-                    color="emerald"
-                />
-                <StatCard 
-                    title="Proteína" 
-                    value="82g" 
-                    subtitle="+12g vs ayer" 
-                    icon={<Zap className="text-amber-400" />} 
-                    trend="up"
-                    color="purple"
-                />
-                <StatCard 
-                    title="Hidratación" 
-                    value="1.8L" 
-                    subtitle="72% del objetivo" 
-                    icon={<Droplets className="text-blue-400" />} 
-                    trend="neutral"
-                    color="blue"
-                />
-                 <StatCard 
-                    title="Análisis" 
-                    value="24" 
-                    subtitle="Esta semana" 
-                    icon={<Activity className="text-purple-400" />} 
-                    trend="up"
-                    color="pink"
-                />
-            </div>
+            {/* TAB CONTENT */}
+            
+            {/* 1. SCANNER TAB */}
+            {activeTab === 'scan' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in">
+                    <div className="lg:col-span-2 space-y-6">
+                         {/* Stats Row */}
+                         <div className="grid grid-cols-3 gap-4 mb-2">
+                            <StatCard title="Calorías" value="1,847" icon={<Flame className="text-emerald-400" />} />
+                            <StatCard title="Proteína" value="82g" icon={<Zap className="text-amber-400" />} />
+                            <StatCard title="Agua" value="1.8L" icon={<Droplets className="text-blue-400" />} />
+                         </div>
 
-            {/* Main Grid: Upload Area & History */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                
-                {/* Center Panel - Upload & Results */}
-                <div className="lg:col-span-2 space-y-6">
-                    <div className="glass-panel rounded-3xl p-1 border border-white/10 relative overflow-hidden min-h-[400px]">
-                        
-                        <div className="p-4 border-b border-white/5 flex justify-between items-center bg-[#1e1033]/50">
-                            <h3 className="font-semibold text-white flex items-center gap-2">
-                                <Camera className="w-4 h-4 text-emerald-400" /> Analizar Nueva Comida
-                            </h3>
-                            <span className="text-xs text-gray-500">Sube una foto o toma una para obtener análisis instantáneo</span>
-                        </div>
-
-                        <div className="p-6">
-                            {!state.data && !state.imagePreview ? (
+                        <div className="glass-panel rounded-3xl p-6 border border-white/10 relative min-h-[500px]">
+                            {/* Upload Logic reused from previous */}
+                             {!scanState.data && !scanState.imagePreview ? (
                                 <div 
-                                    className="border-2 border-dashed border-gray-700 hover:border-emerald-500/50 bg-[#0f0518]/50 rounded-2xl h-80 flex flex-col items-center justify-center transition-all cursor-pointer group"
+                                    className="border-2 border-dashed border-gray-700 hover:border-emerald-500/50 bg-[#0f0518]/50 rounded-2xl h-96 flex flex-col items-center justify-center transition-all cursor-pointer group"
                                     onClick={() => fileInputRef.current?.click()}
                                 >
                                     <div className="w-20 h-20 rounded-full bg-[#1e1033] flex items-center justify-center mb-6 group-hover:scale-110 transition-transform border border-white/5 shadow-2xl">
                                         <Upload className="w-8 h-8 text-emerald-400" />
                                     </div>
-                                    <h4 className="text-lg font-bold text-white mb-2">Arrastra tu imagen aquí</h4>
-                                    <p className="text-gray-500 text-sm mb-6">o haz clic para seleccionar</p>
-                                    <button className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2.5 rounded-xl font-medium text-sm transition-colors shadow-lg shadow-emerald-900/20 flex items-center gap-2">
-                                        <Camera className="w-4 h-4" /> Seleccionar Foto
-                                    </button>
-                                    <input 
-                                        type="file" 
-                                        ref={fileInputRef}
-                                        onChange={handleImageUpload}
-                                        accept="image/*"
-                                        className="hidden"
-                                    />
+                                    <h4 className="text-lg font-bold text-white mb-2">Subir imagen de comida</h4>
+                                    <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
                                 </div>
                             ) : (
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
-                                    {/* Image Preview Side */}
-                                    <div className="relative rounded-2xl overflow-hidden border border-white/10 h-80 bg-black">
-                                        {state.imagePreview && (
-                                            <img src={state.imagePreview} alt="Preview" className="w-full h-full object-cover opacity-80" />
-                                        )}
-                                        {state.isLoading && (
-                                            <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center backdrop-blur-sm">
+                                <div className="flex flex-col md:flex-row gap-6 h-full">
+                                    <div className="w-full md:w-1/2 relative rounded-2xl overflow-hidden h-96 bg-black">
+                                        <img src={scanState.imagePreview!} alt="Preview" className="w-full h-full object-cover" />
+                                        {scanState.isLoading && (
+                                            <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center backdrop-blur-sm">
                                                 <Loader2 className="w-10 h-10 text-emerald-400 animate-spin mb-4" />
-                                                <p className="text-emerald-200 font-medium animate-pulse">Analizando con Gemini Pro...</p>
+                                                <p className="text-emerald-200">Analizando...</p>
                                             </div>
                                         )}
-                                        <div className="absolute top-4 right-4">
-                                            <button 
-                                                onClick={resetAnalysis}
-                                                className="bg-black/50 hover:bg-black/80 text-white p-2 rounded-full backdrop-blur-md transition-colors"
-                                            >
-                                                <X className="w-5 h-5" />
-                                            </button>
-                                        </div>
+                                        <button onClick={() => setScanState({isLoading:false, error:null, data:null, imagePreview:null})} className="absolute top-4 right-4 bg-black/50 p-2 rounded-full text-white"><X className="w-4 h-4"/></button>
                                     </div>
-
-                                    {/* Result Data Side */}
-                                    {state.data && (
-                                        <div className="flex flex-col h-full justify-between space-y-4">
-                                            <div>
-                                                <div className="flex justify-between items-start mb-2">
-                                                    <h2 className="text-2xl font-bold text-white">{state.data.foodName}</h2>
-                                                    <div className="bg-emerald-500/20 text-emerald-300 px-3 py-1 rounded-lg text-xs font-bold border border-emerald-500/30">
-                                                        Score: {state.data.healthScore}
-                                                    </div>
-                                                </div>
-                                                <p className="text-gray-400 text-sm line-clamp-2">{state.data.description}</p>
+                                    {scanState.data && (
+                                        <div className="w-full md:w-1/2 flex flex-col gap-4">
+                                            <h2 className="text-3xl font-bold text-white">{scanState.data.foodName}</h2>
+                                            <div className="bg-[#1e1033] p-4 rounded-xl border border-white/5">
+                                                <NutritionChart data={scanState.data} />
                                             </div>
-
-                                            <div className="bg-[#0f0518] p-4 rounded-2xl border border-white/5">
-                                                <NutritionChart data={state.data} />
-                                            </div>
-
-                                            <div className="grid grid-cols-3 gap-2 text-center">
-                                                <MacroBadge label="Prot" value={`${state.data.protein}g`} color="bg-emerald-500/20 text-emerald-400" />
-                                                <MacroBadge label="Carb" value={`${state.data.carbs}g`} color="bg-blue-500/20 text-blue-400" />
-                                                <MacroBadge label="Grasa" value={`${state.data.fat}g`} color="bg-amber-500/20 text-amber-400" />
+                                            <div className="bg-indigo-900/20 p-4 rounded-xl border border-indigo-500/20">
+                                                <h4 className="text-indigo-300 font-bold mb-1 flex items-center gap-2"><Sparkles className="w-4 h-4"/> Explicación IA</h4>
+                                                <p className="text-sm text-gray-300 leading-relaxed">{scanState.data.advice}</p>
                                             </div>
                                         </div>
                                     )}
                                 </div>
                             )}
                         </div>
-                        
-                        {/* Advice Section Footer */}
-                        {state.data && (
-                            <div className="bg-[#2a1745]/50 p-4 border-t border-white/5 flex gap-4 items-start">
-                                <div className="bg-indigo-500/20 p-2 rounded-lg shrink-0">
-                                    <Info className="w-5 h-5 text-indigo-400" />
+                    </div>
+                </div>
+            )}
+
+            {/* 2. CHAT TAB */}
+            {activeTab === 'chat' && (
+                <div className="glass-panel rounded-3xl border border-white/10 h-[calc(100vh-180px)] flex flex-col animate-fade-in">
+                    <div className="p-4 border-b border-white/5 bg-[#1e1033]/80 rounded-t-3xl flex justify-between items-center">
+                        <div>
+                            <h3 className="font-bold flex items-center gap-2"><MessageSquare className="w-5 h-5 text-emerald-400"/> NutriLens Chat</h3>
+                            <p className="text-xs text-gray-500">Evaluación Clínica & Planes Personalizados</p>
+                        </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                        {chatMessages.map((msg) => (
+                            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                <div className={`max-w-[80%] p-4 rounded-2xl ${msg.role === 'user' ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-[#1e1033] border border-white/10 text-gray-200 rounded-tl-none'}`}>
+                                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>
                                 </div>
-                                <div>
-                                    <h4 className="text-sm font-semibold text-indigo-200 mb-1">Feedback Profesional</h4>
-                                    <p className="text-sm text-gray-400 leading-relaxed">{state.data.advice}</p>
+                            </div>
+                        ))}
+                        {isChatLoading && (
+                            <div className="flex justify-start">
+                                <div className="bg-[#1e1033] p-4 rounded-2xl rounded-tl-none border border-white/10 flex items-center gap-2">
+                                    <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce"></div>
+                                    <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce delay-100"></div>
+                                    <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce delay-200"></div>
                                 </div>
                             </div>
                         )}
-                        {state.error && (
-                            <div className="bg-red-500/10 text-red-400 p-4 m-6 rounded-xl border border-red-500/20 text-center text-sm">
-                                {state.error}
-                            </div>
-                        )}
+                    </div>
+                    <div className="p-4 bg-[#1e1033]/50 border-t border-white/5 rounded-b-3xl">
+                        <div className="relative">
+                            <input 
+                                type="text" 
+                                value={chatInput}
+                                onChange={(e) => setChatInput(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                                placeholder="Responde aquí..." 
+                                className="w-full bg-[#0f0518] border border-gray-700 rounded-xl py-4 pl-6 pr-14 text-white focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                            />
+                            <button onClick={handleSendMessage} className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white transition-colors">
+                                <Send className="w-5 h-5" />
+                            </button>
+                        </div>
                     </div>
                 </div>
+            )}
 
-                {/* Right Panel - History */}
-                <div className="space-y-6">
-                    <div className="glass-panel p-5 rounded-3xl border border-white/10">
-                        <div className="flex items-center gap-2 mb-6">
-                            <History className="w-5 h-5 text-blue-400" />
-                            <h3 className="font-bold text-white">Historial Reciente</h3>
+            {/* 3. RECIPES TAB */}
+            {activeTab === 'recipes' && (
+                <div className="space-y-6 animate-fade-in">
+                    <div className="glass-panel p-8 rounded-3xl border border-white/10 text-center">
+                        <h3 className="text-2xl font-bold mb-4">Generador de Recetas Inteligente</h3>
+                        <p className="text-gray-400 mb-6 max-w-xl mx-auto">Describe tus preferencias (ej: "Desayuno alto en proteína sin lácteos") y la IA creará opciones validadas con instrucciones detalladas.</p>
+                        <div className="flex max-w-xl mx-auto gap-2">
+                            <input 
+                                type="text" 
+                                value={recipeInput}
+                                onChange={(e) => setRecipeInput(e.target.value)}
+                                placeholder="Ej: Cena para diabetes con pollo..."
+                                className="flex-1 bg-[#0f0518] border border-gray-700 rounded-xl px-4 py-3 focus:outline-none focus:border-emerald-500" 
+                            />
+                            <button 
+                                onClick={handleGenerateRecipes}
+                                disabled={isRecipeLoading}
+                                className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 rounded-xl font-bold transition-colors flex items-center gap-2"
+                            >
+                                {isRecipeLoading ? <Loader2 className="animate-spin"/> : <Sparkles className="w-5 h-5" />} Generar
+                            </button>
                         </div>
+                    </div>
 
-                        <div className="space-y-3">
-                            {recentHistory.map((item) => (
-                                <div key={item.id} className="bg-[#1e1033] hover:bg-[#251340] p-3 rounded-xl flex items-center justify-between border border-white/5 transition-colors cursor-pointer group">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-10 h-10 rounded-lg bg-[#0f0518] flex items-center justify-center text-lg border border-white/5">
-                                            {item.icon}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {recipes.map((recipe, idx) => (
+                            <div key={idx} className="bg-[#1e1033] border border-white/5 rounded-2xl overflow-hidden hover:border-emerald-500/30 transition-all group flex flex-col h-full">
+                                <div className="h-2 bg-gradient-to-r from-emerald-500 to-green-400"></div>
+                                <div className="p-6 flex-1 flex flex-col">
+                                    <div className="flex justify-between items-start mb-4">
+                                        <h4 className="font-bold text-xl text-white group-hover:text-emerald-400 transition-colors">{recipe.name}</h4>
+                                        <span className="text-xs bg-white/5 px-2 py-1 rounded text-gray-400 whitespace-nowrap">{recipe.prepTime}</span>
+                                    </div>
+                                    <p className="text-sm text-gray-400 mb-4 italic">"{recipe.explanation}"</p>
+                                    
+                                    <div className="grid grid-cols-3 gap-2 mb-4">
+                                        <div className="text-center bg-black/20 rounded p-2">
+                                            <div className="text-xs text-gray-500">CAL</div>
+                                            <div className="font-bold">{recipe.calories}</div>
                                         </div>
-                                        <div>
-                                            <p className="text-sm font-medium text-white group-hover:text-emerald-400 transition-colors">{item.foodName}</p>
-                                            <p className="text-[10px] text-gray-500 flex items-center gap-1">
-                                                <Calendar className="w-3 h-3" /> {item.timeAgo}
-                                            </p>
+                                        <div className="text-center bg-black/20 rounded p-2">
+                                            <div className="text-xs text-gray-500">PRO</div>
+                                            <div className="font-bold text-emerald-400">{recipe.macros.protein}</div>
+                                        </div>
+                                        <div className="text-center bg-black/20 rounded p-2">
+                                            <div className="text-xs text-gray-500">GRASA</div>
+                                            <div className="font-bold text-amber-400">{recipe.macros.fat}</div>
                                         </div>
                                     </div>
-                                    <div className="text-right">
-                                        <p className="text-sm font-bold text-white">{item.calories}</p>
-                                        <p className="text-[10px] text-gray-500">kcal</p>
+                                    
+                                    {/* Ingredients Section */}
+                                    <div className="mb-4">
+                                        <h5 className="font-bold text-emerald-400 mb-2 text-xs uppercase flex items-center gap-2"><Utensils className="w-3 h-3"/> Ingredientes</h5>
+                                        <ul className="text-xs text-gray-300 list-disc list-inside space-y-1">
+                                            {recipe.ingredients?.map((ing, i) => (
+                                                <li key={i}>{ing}</li>
+                                            ))}
+                                        </ul>
                                     </div>
-                                    <ChevronRight className="w-4 h-4 text-gray-600 group-hover:translate-x-1 transition-transform" />
+
+                                    {/* Instructions Section */}
+                                    <div className="mb-4 flex-1">
+                                        <h5 className="font-bold text-emerald-400 mb-2 text-xs uppercase flex items-center gap-2"><ChefHat className="w-3 h-3"/> Preparación</h5>
+                                        <ol className="text-xs text-gray-300 list-decimal list-inside space-y-2">
+                                            {recipe.instructions?.map((step, i) => (
+                                                <li key={i} className="leading-relaxed"><span className="text-gray-400">{step}</span></li>
+                                            ))}
+                                        </ol>
+                                    </div>
+                                    
+                                    <div className="flex flex-wrap gap-2 mt-auto pt-4 border-t border-white/5">
+                                        {recipe.tags.map(tag => (
+                                            <span key={tag} className="text-[10px] bg-white/5 px-2 py-1 rounded-full text-gray-400">#{tag}</span>
+                                        ))}
+                                    </div>
                                 </div>
-                            ))}
-                        </div>
-                        
-                        <button className="w-full mt-6 py-3 rounded-xl bg-[#1e1033] text-xs font-semibold text-gray-400 hover:text-white border border-white/5 hover:bg-[#251340] transition-all flex items-center justify-center gap-2">
-                            Ver todo el historial <ChevronRight className="w-3 h-3" />
-                        </button>
-                    </div>
-
-                    {/* Promo / Premium Teaser */}
-                    <div className="bg-gradient-to-br from-indigo-900/50 to-purple-900/50 p-5 rounded-3xl border border-indigo-500/20 relative overflow-hidden">
-                        <div className="relative z-10">
-                            <div className="flex items-center gap-2 mb-2">
-                                <span className="bg-amber-400/20 text-amber-300 text-[10px] font-bold px-2 py-0.5 rounded-md border border-amber-400/20">PRO</span>
-                                <h4 className="font-bold text-white text-sm">Objetivos Semanales</h4>
                             </div>
-                            <p className="text-xs text-indigo-200 mb-4">Estás cerca de cumplir tu meta de proteínas.</p>
-                            <div className="w-full bg-[#0f0518] rounded-full h-2 mb-1">
-                                <div className="bg-gradient-to-r from-amber-400 to-orange-500 h-2 rounded-full w-[85%]"></div>
-                            </div>
-                            <div className="flex justify-between text-[10px] text-gray-400">
-                                <span>Progreso</span>
-                                <span>85%</span>
-                            </div>
-                        </div>
+                        ))}
                     </div>
                 </div>
-            </div>
+            )}
+
         </div>
       </main>
     </div>
   );
 };
 
-const NavItem = ({ icon, label }: { icon: React.ReactNode, label: string }) => (
-    <button className="w-full flex items-center gap-3 px-4 py-3 text-gray-400 hover:text-white hover:bg-white/5 rounded-xl transition-all group">
-        <div className="w-5 h-5 group-hover:text-emerald-400 transition-colors">{icon}</div>
+const NavItem = ({ active, onClick, icon, label }: any) => (
+    <button 
+        onClick={onClick}
+        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${active ? 'bg-emerald-600/10 text-emerald-400 border border-emerald-500/20' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
+    >
+        <div className={`w-5 h-5 ${active ? 'text-emerald-400' : ''}`}>{icon}</div>
         <span className="font-medium text-sm">{label}</span>
     </button>
 );
 
-const StatCard = ({ title, value, subtitle, icon, trend, color }: any) => {
-    const bgColors: any = {
-        emerald: "bg-[#1e1033] border-emerald-500/10",
-        purple: "bg-[#1e1033] border-purple-500/10",
-        blue: "bg-[#1e1033] border-blue-500/10",
-        pink: "bg-[#1e1033] border-pink-500/10",
-    };
-
-    return (
-        <div className={`${bgColors[color]} border p-5 rounded-2xl relative overflow-hidden group hover:border-white/10 transition-colors`}>
-            <div className="flex justify-between items-start mb-4">
-                <span className="text-gray-400 text-xs font-medium">{title}</span>
-                <div className="p-2 rounded-lg bg-white/5 group-hover:scale-110 transition-transform">{icon}</div>
-            </div>
-            <div>
-                <h3 className="text-2xl font-bold text-white mb-1">{value}</h3>
-                <p className={`text-xs flex items-center gap-1 ${trend === 'up' ? 'text-emerald-400' : trend === 'down' ? 'text-emerald-400' : 'text-blue-400'}`}>
-                    {trend === 'down' ? '↓' : trend === 'up' ? '↑' : '•'} {subtitle}
-                </p>
-            </div>
+const StatCard = ({ title, value, icon }: any) => (
+    <div className="bg-[#1e1033] border border-white/5 p-4 rounded-2xl flex items-center justify-between">
+        <div>
+            <span className="text-gray-500 text-xs uppercase tracking-wider">{title}</span>
+            <div className="text-xl font-bold text-white">{value}</div>
         </div>
-    );
-};
-
-const MacroBadge = ({ label, value, color }: any) => (
-    <div className={`${color} p-2 rounded-xl flex flex-col items-center justify-center`}>
-        <span className="text-[10px] font-bold opacity-70 uppercase">{label}</span>
-        <span className="text-sm font-bold">{value}</span>
+        <div className="p-2 bg-white/5 rounded-lg">{icon}</div>
     </div>
 );
 
-export default Dashboard;
+export default UserDashboard;
